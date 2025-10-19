@@ -1,0 +1,98 @@
+name: android-release-build-and-publish
+
+# 手动触发
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "要打包的分支"
+        required: true
+        default: "master"
+
+jobs:
+  build-android-release:
+    runs-on: macos-latest
+    permissions:
+      contents: write # 必须有 write 权限才能创建 Release
+    steps:
+      # 1. 签出代码
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      # 2. 设置 Java 环境 (keytool 需要 Java)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: "17"
+          cache: 'gradle'
+
+      # 3. 设置 Flutter
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          cache: true
+
+      # 4. 【新增】自动生成一个临时的签名密钥 (JKS)
+      # 使用 Java 的 keytool 快速生成一个用于签名的文件
+      - name: Generate Temporary Keystore
+        run: |
+          echo "正在生成临时的 release.jks 密钥..."
+          keytool -genkey -v \
+            -keystore simple_live_app/android/app/release.jks \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias androidkey \
+            -keypass android \
+            -storepass android \
+            -dname "CN=Android Debug, O=Android, C=US"
+          echo "临时 JKS 文件已创建。"
+          
+      # 5. 【新增】创建临时的 key.properties
+      # 告诉 Gradle 去哪里找我们刚生成的 JKS 文件
+      - name: Create key.properties
+        run: |
+          echo "storePassword=android" > simple_live_app/android/key.properties
+          echo "keyPassword=android" >> simple_live_app/android/key.properties
+          echo "keyAlias=androidkey" >> simple_live_app/android/key.properties
+          echo "storeFile=app/release.jks" >> simple_live_app/android/key.properties
+        # 注意：storeFile 的路径是相对于 android 目录的
+
+      # 6. 拉取依赖
+      - name: Restore packages
+        run: flutter pub get
+        working-directory: simple_live_app
+
+      # 7. 【修改】打包 Release APK
+      # Flutter 会自动读取 key.properties 文件并使用我们的临时密钥
+      - name: Build Release APK
+        run: flutter build apk --release --split-per-abi
+        working-directory: simple_live_app
+
+      # 8. 上传 APK 到 Artifact (方便CI内部流转)
+      - name: Upload APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apks
+          path: |
+            simple_live_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            simple_live_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            simple_live_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
+
+      # 9. 【保留】创建 GitHub Release 并上传 APK
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 使用分支名和运行ID创建唯一的 tag_name
+          tag_name: "build-${{ github.event.inputs.branch }}-${{ github.run_id }}"
+          name: "Build #${{ github.run_number }} (${{ github.event.inputs.branch }})"
+          body: |
+            自动构建的 Release 版本 (使用临时签名)
+            分支: ${{ github.event.inputs.branch }}
+            Commit: ${{ github.sha }}
+            **注意**: 这是一个临时签名的包，安装前请先卸载旧版本。
+          files: |
+            simple_live_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            simple_live_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            simple_live_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
+
+      - run: echo "✅ Android Release APK 打包并发布到 Release 页面完成！"

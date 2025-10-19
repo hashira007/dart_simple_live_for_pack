@@ -33,8 +33,7 @@ jobs:
           flutter-version: '3.22.x'
           cache: true
 
-      # 4. 【新增】自动生成一个临时的签名密钥 (JKS)
-      # 使用 Java 的 keytool 快速生成一个用于签名的文件
+      # 4. 自动生成一个临时的签名密钥 (JKS)
       - name: Generate Temporary Keystore
         run: |
           echo "正在生成临时的 release.jks 密钥..."
@@ -47,28 +46,38 @@ jobs:
             -dname "CN=Android Debug, O=Android, C=US"
           echo "临时 JKS 文件已创建。"
           
-      # 5. 【新增】创建临时的 key.properties
-      # 告诉 Gradle 去哪里找我们刚生成的 JKS 文件
+      # 5. 【已修复】创建临时的 key.properties
+      # storeFile 路径已从 'app/release.jks' 改为 'release.jks'
       - name: Create key.properties
         run: |
           echo "storePassword=android" > simple_live_app/android/key.properties
           echo "keyPassword=android" >> simple_live_app/android/key.properties
           echo "keyAlias=androidkey" >> simple_live_app/android/key.properties
-          echo "storeFile=app/release.jks" >> simple_live_app/android/key.properties
-        # 注意：storeFile 的路径是相对于 android 目录的
+          echo "storeFile=release.jks" >> simple_live_app/android/key.properties
+        # 注意：storeFile 的路径现在是 'release.jks'，
+        # 它会被 android/app/build.gradle 正确解析为 android/app/release.jks
 
-      # 6. 拉取依赖
+      # 6. 【新增】修复 Kotlin 版本
+      # 日志显示依赖需要 1.8.0+ (日志中有 1.8.22)，这里自动升级
+      - name: Fix Kotlin Version
+        run: |
+          echo "正在自动升级 Kotlin 版本到 1.8.22..."
+          # 使用 sed 在 CI 中动态修改 build.gradle 文件
+          # (macOS 上的 sed -i 需要一个备份后缀, 这里用 .bak)
+          sed -i.bak "s/ext.kotlin_version = '.*'/ext.kotlin_version = '1.8.22'/" simple_live_app/android/build.gradle
+          echo "Kotlin 版本已修改。"
+
+      # 7. 拉取依赖
       - name: Restore packages
         run: flutter pub get
         working-directory: simple_live_app
 
-      # 7. 【修改】打包 Release APK
-      # Flutter 会自动读取 key.properties 文件并使用我们的临时密钥
+      # 8. 打包 Release APK
       - name: Build Release APK
         run: flutter build apk --release --split-per-abi
         working-directory: simple_live_app
 
-      # 8. 上传 APK 到 Artifact (方便CI内部流转)
+      # 9. 上传 APK 到 Artifact
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -78,11 +87,10 @@ jobs:
             simple_live_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
             simple_live_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
 
-      # 9. 【保留】创建 GitHub Release 并上传 APK
+      # 10. 创建 GitHub Release 并上传 APK
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # 使用分支名和运行ID创建唯一的 tag_name
           tag_name: "build-${{ github.event.inputs.branch }}-${{ github.run_id }}"
           name: "Build #${{ github.run_number }} (${{ github.event.inputs.branch }})"
           body: |

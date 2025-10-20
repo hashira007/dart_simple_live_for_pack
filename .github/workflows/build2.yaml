@@ -1,106 +1,214 @@
-name: android-release-build-and-publish
-
-# 手动触发
+name: app-build-action
 on:
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: "要打包的分支"
-        required: true
-        default: "master"
+  push:
+    tags:
+      - "v*"
 
 jobs:
-  build-android-release:
-    runs-on: macos-latest
+  # Android 构建
+  build-android:
+    runs-on: ubuntu-22.04
     permissions:
-      contents: write # 必须有 write 权限才能创建 Release
+      contents: write
     steps:
-      # 1. 签出代码
+      # 签出代码
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch }}
+          ref: master
 
-      # 2. 设置 Java 环境 (keytool 需要 Java)
+      # 设置JAVA环境
       - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: "17"
           cache: 'gradle'
 
-      # 3. 设置 Flutter
-      - uses: subosito/flutter-action@v2
+      # 设置Flutter环境
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.22.x'
           cache: true
 
-      # 4. 自动生成一个临时的签名密钥 (JKS)
-      - name: Generate Temporary Keystore
-        run: |
-          echo "正在生成临时的 release.jks 密钥..."
-          keytool -genkey -v \
-            -keystore simple_live_app/android/app/release.jks \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -alias androidkey \
-            -keypass android \
-            -storepass android \
-            -dname "CN=Android Debug, O=Android, C=US"
-          echo "临时 JKS 文件已创建。"
-          
-      # 5. 【已修复】创建临时的 key.properties
-      # storeFile 路径已从 'app/release.jks' 改为 'release.jks'
-      - name: Create key.properties
-        run: |
-          echo "storePassword=android" > simple_live_app/android/key.properties
-          echo "keyPassword=android" >> simple_live_app/android/key.properties
-          echo "keyAlias=androidkey" >> simple_live_app/android/key.properties
-          echo "storeFile=release.jks" >> simple_live_app/android/key.properties
-        # 注意：storeFile 的路径现在是 'release.jks'，
-        # 它会被 android/app/build.gradle 正确解析为 android/app/release.jks
+      # 启用安卓构建
+      - name: Enable Android
+        run: flutter config --enable-android
 
-      # 6. 【新增】修复 Kotlin 版本
-      # 日志显示依赖需要 1.8.0+ (日志中有 1.8.22)，这里自动升级
-      - name: Fix Kotlin Version
-        run: |
-          echo "正在自动升级 Kotlin 版本到 1.8.22..."
-          # 使用 sed 在 CI 中动态修改 build.gradle 文件
-          # (macOS 上的 sed -i 需要一个备份后缀, 这里用 .bak)
-          sed -i.bak "s/ext.kotlin_version = '.*'/ext.kotlin_version = '1.8.22'/" simple_live_app/android/build.gradle
-          echo "Kotlin 版本已修改。"
-
-      # 7. 拉取依赖
+      # 更新Flutter包
       - name: Restore packages
-        run: flutter pub get
-        working-directory: simple_live_app
+        run: |
+          cd simple_live_app
+          flutter pub get
 
-      # 8. 打包 Release APK
-      - name: Build Release APK
-        run: flutter build apk --release --split-per-abi
-        working-directory: simple_live_app
+      # 随机生成签名文件（仅个人使用）
+      - name: Generate random keystore
+        run: |
+          mkdir -p simple_live_app/android
+          keytool -genkey -v \
+            -keystore simple_live_app/android/debug.jks \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias debugKey \
+            -storepass android \
+            -keypass android \
+            -dname "CN=hashira,O=hashira,OU=Private,C=CN"
+          echo "storeFile=debug.jks" > simple_live_app/android/key.properties
+          echo "storePassword=android" >> simple_live_app/android/key.properties
+          echo "keyPassword=android" >> simple_live_app/android/key.properties
+          echo "keyAlias=debugKey" >> simple_live_app/android/key.properties
 
-      # 9. 上传 APK 到 Artifact
+      # 打包APK
+      - name: Build APK
+        run: |
+          cd simple_live_app
+          flutter build apk --release --split-per-abi
+
+      # 上传APK至Artifacts
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-release-apks
+          name: android
           path: |
-            simple_live_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-            simple_live_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-            simple_live_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
+            simple_live_app/build/app/outputs/flutter-apk/*.apk
 
-      # 10. 创建 GitHub Release 并上传 APK
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      # 读取版本信息
+      - name: Read version
+        id: version
+        uses: juliangruber/read-file-action@v1
         with:
-          tag_name: "build-${{ github.event.inputs.branch }}-${{ github.run_id }}"
-          name: "Build #${{ github.run_number }} (${{ github.event.inputs.branch }})"
-          body: |
-            自动构建的 Release 版本 (使用临时签名)
-            分支: ${{ github.event.inputs.branch }}
-            Commit: ${{ github.sha }}
-            **注意**: 这是一个临时签名的包，安装前请先卸载旧版本。
-          files: |
-            simple_live_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-            simple_live_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-            simple_live_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
+          path: assets/app_version.json
 
-      - run: echo "✅ Android Release APK 打包并发布到 Release 页面完成！"
+      # 上传至Release
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "${{ fromJson(steps.version.outputs.content).version }}"
+          body: "${{ fromJson(steps.version.outputs.content).version_desc }}"
+          prerelease: ${{ fromJson(steps.version.outputs.content).prerelease }}
+          token: ${{ secrets.TOKEN }}
+          files: |
+            simple_live_app/build/app/outputs/flutter-apk/*.apk
+
+      - run: echo "✅ Android build done, status ${{ job.status }}"
+
+  # Linux 构建
+  build-linux:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.22.x"
+          cache: true
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libmpv-dev mpv
+
+      - name: Enable Flutter Desktop
+        run: flutter config --enable-linux-desktop
+
+      - name: Restore Packages
+        run: |
+          cd simple_live_app
+          flutter pub get
+
+      - name: Install flutter_distributor
+        run: dart pub global activate flutter_distributor
+
+      - name: Build Linux
+        run: |
+          cd simple_live_app
+          flutter_distributor package --platform linux --targets deb,zip --skip-clean
+
+      - name: Upload Linux APP to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            simple_live_app/build/dist/*/*.deb
+            simple_live_app/build/dist/*/*.zip
+
+      - name: Read version
+        id: version
+        uses: juliangruber/read-file-action@v1
+        with:
+          path: assets/app_version.json
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "${{ fromJson(steps.version.outputs.content).version }}"
+          body: "${{ fromJson(steps.version.outputs.content).version_desc }}"
+          prerelease: ${{ fromJson(steps.version.outputs.content).prerelease }}
+          token: ${{ secrets.TOKEN }}
+          files: |
+            simple_live_app/build/dist/*/*.deb
+            simple_live_app/build/dist/*/*.zip
+
+      - run: echo "✅ Linux build done, status ${{ job.status }}"
+
+  # Windows 构建
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.22.x"
+          cache: true
+
+      - name: Enable Flutter Desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Restore Packages
+        run: |
+          cd simple_live_app
+          flutter pub get
+
+      - name: Install flutter_distributor
+        run: dart pub global activate flutter_distributor
+
+      - name: Build Windows
+        run: |
+          cd simple_live_app
+          flutter_distributor package --platform windows --targets msix,zip --skip-clean
+
+      - name: Upload Windows APP to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            simple_live_app/build/dist/*/*.msix
+            simple_live_app/build/dist/*/*.zip
+
+      - name: Read version
+        id: version
+        uses: juliangruber/read-file-action@v1
+        with:
+          path: assets/app_version.json
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "${{ fromJson(steps.version.outputs.content).version }}"
+          body: "${{ fromJson(steps.version.outputs.content).version_desc }}"
+          prerelease: ${{ fromJson(steps.version.outputs.content).prerelease }}
+          token: ${{ secrets.TOKEN }}
+          files: |
+            simple_live_app/build/dist/*/*.msix
+            simple_live_app/build/dist/*/*.zip
+
+      - run: echo "✅ Windows build done, status ${{ job.status }}"

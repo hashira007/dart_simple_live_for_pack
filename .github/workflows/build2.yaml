@@ -1,8 +1,12 @@
 name: gptfix
+# 手动触发
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "要打包的分支"
+        required: true
+        default: "master"
 
 jobs:
   # Android 构建

@@ -1,4 +1,4 @@
-name: app-build-action
+name: gptfix
 on:
   push:
     tags:
